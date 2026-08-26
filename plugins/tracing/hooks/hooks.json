@@ -1,0 +1,17 @@
+{
+  "description": "Upload completed WorkBuddy turns to Langfuse",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/dist/index.mjs\"",
+            "description": "Upload the completed WorkBuddy turn to Langfuse",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

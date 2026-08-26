@@ -1,0 +1,12 @@
+{
+  "name": "tracing",
+  "version": "0.1.0",
+  "description": "Trace WorkBuddy sessions to Langfuse.",
+  "author": {
+    "name": "ai-native-thinking"
+  },
+  "license": "MIT",
+  "keywords": ["workbuddy", "codebuddy", "hooks", "langfuse", "observability"],
+  "category": "development",
+  "hooks": "./hooks/hooks.json"
+}
