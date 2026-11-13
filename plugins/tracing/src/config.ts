@@ -15,6 +15,10 @@ export type Config = {
   max_chars: number;
   debug: boolean;
   fail_on_error: boolean;
+  /** HTTP(S) proxy for span uploads, e.g. `http://127.0.0.1:7897`. */
+  proxy_url?: string;
+  /** Force media upload on/off; defaults to off when a proxy is configured. */
+  media_upload?: boolean;
 };
 
 const DEFAULTS: Config = {
@@ -92,6 +96,12 @@ function cleanConfig(value: Record<string, unknown>): Partial<Config> {
     ...(booleanValue(value.fail_on_error) !== undefined
       ? { fail_on_error: booleanValue(value.fail_on_error) }
       : {}),
+    ...(typeof value.proxy_url === "string" && value.proxy_url.trim()
+      ? { proxy_url: value.proxy_url.trim() }
+      : {}),
+    ...(booleanValue(value.media_upload) !== undefined
+      ? { media_upload: booleanValue(value.media_upload) }
+      : {}),
   } as Partial<Config>;
 }
 
@@ -128,7 +138,23 @@ function readEnvironment(env: Record<string, string | undefined>): Partial<Confi
     max_chars: env.LANGFUSE_WORKBUDDY_MAX_CHARS,
     debug: env.LANGFUSE_WORKBUDDY_DEBUG,
     fail_on_error: env.LANGFUSE_WORKBUDDY_FAIL_ON_ERROR,
+    proxy_url: env.LANGFUSE_WORKBUDDY_PROXY_URL,
+    media_upload: first(env, "LANGFUSE_WORKBUDDY_MEDIA_UPLOAD", "LANGFUSE_MEDIA_UPLOAD_ENABLED"),
   });
+}
+
+/** Standard proxy variables, used only when no explicit proxy is configured. */
+function ambientProxy(env: Record<string, string | undefined>): string | undefined {
+  const value = first(
+    env,
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+  );
+  return value?.trim() || undefined;
 }
 
 /** Resolve defaults -> ~/.workbuddy -> project .workbuddy -> environment. */
@@ -144,10 +170,14 @@ export async function getConfig(options?: {
     readConfigFile(path.join(home, ".workbuddy", "langfuse.json")),
     readConfigFile(path.join(cwd, ".workbuddy", "langfuse.json")),
   ]);
-  return {
+  const config: Config = {
     ...DEFAULTS,
     ...globalConfig,
     ...localConfig,
     ...readEnvironment(env),
   };
+  // Explicit config (file or LANGFUSE_WORKBUDDY_PROXY_URL) wins over the
+  // ambient shell proxy variables.
+  config.proxy_url ??= ambientProxy(env);
+  return config;
 }

@@ -121,12 +121,28 @@ export WORKBUDDY_CONFIG_DIR="$HOME/.workbuddy"
   "secret_key": "sk-lf-...",
   "base_url": "https://cloud.langfuse.com",
   "environment": "development",
-  "tags": ["workbuddy"]
+  "tags": ["workbuddy"],
+  "proxy_url": "http://127.0.0.1:7897",
+  "media_upload": false
 }
 ```
 
 也可以在项目下创建 `<project>/.workbuddy/langfuse.json`。优先级为：默认值 → 全局配置 →
 项目配置 → 环境变量。
+
+### 通过代理上传
+
+当 Langfuse 实例在当前网络下不可直连时，用 `proxy_url` 指定一个 HTTP 代理（例如本地 Clash
+的 `http://127.0.0.1:7897`）。插件会为 OTLP 导出器注入一个 CONNECT 隧道 agent，跨度上传
+（`/api/public/otel/v1/traces`）走该代理。
+
+注意：
+
+- OpenTelemetry 的 Node 导出器**不读取** `HTTPS_PROXY` 之类的环境变量，必须显式设置
+  `proxy_url`（或 `LANGFUSE_WORKBUDDY_PROXY_URL`）；后者缺省时才会回退到 `HTTPS_PROXY` /
+  `HTTP_PROXY` / `ALL_PROXY`。
+- 媒体上传走 `fetch`，不受该代理覆盖，因此配置了代理时 `media_upload` 默认为 `false`。
+- 代理只影响上传链路，不影响 trace 的采样与内容。
 
 | 环境变量                           | 说明                                             |
 | ---------------------------------- | ------------------------------------------------ |
@@ -142,6 +158,8 @@ export WORKBUDDY_CONFIG_DIR="$HOME/.workbuddy"
 | `LANGFUSE_WORKBUDDY_MAX_CHARS`     | 单个输入/输出最大字符数，默认 `20000`            |
 | `LANGFUSE_WORKBUDDY_DEBUG`         | 将调试日志写入 stderr                            |
 | `LANGFUSE_WORKBUDDY_FAIL_ON_ERROR` | 测试时让上传错误导致 hook 失败；默认 fail-open   |
+| `LANGFUSE_WORKBUDDY_PROXY_URL`     | 上传使用的 HTTP 代理，如 `http://127.0.0.1:7897`  |
+| `LANGFUSE_WORKBUDDY_MEDIA_UPLOAD`  | 是否上传媒体（`true`/`false`），配代理时默认关    |
 
 ## 数据与隐私
 

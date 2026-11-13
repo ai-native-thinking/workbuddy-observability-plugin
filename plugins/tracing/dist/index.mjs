@@ -6,6 +6,9 @@ import * as fs from "fs";
 import * as zlib from "zlib";
 import { Readable } from "stream";
 import * as path from "path";
+import * as http from "node:http";
+import * as https from "node:https";
+import * as tls from "node:tls";
 
 //#region rolldown:runtime
 var __create = Object.create;
@@ -116,7 +119,9 @@ function cleanConfig(value) {
 		...typeof value.trace_seed === "string" ? { trace_seed: value.trace_seed } : {},
 		...maxChars && maxChars > 0 ? { max_chars: maxChars } : {},
 		...booleanValue(value.debug) !== void 0 ? { debug: booleanValue(value.debug) } : {},
-		...booleanValue(value.fail_on_error) !== void 0 ? { fail_on_error: booleanValue(value.fail_on_error) } : {}
+		...booleanValue(value.fail_on_error) !== void 0 ? { fail_on_error: booleanValue(value.fail_on_error) } : {},
+		...typeof value.proxy_url === "string" && value.proxy_url.trim() ? { proxy_url: value.proxy_url.trim() } : {},
+		...booleanValue(value.media_upload) !== void 0 ? { media_upload: booleanValue(value.media_upload) } : {}
 	};
 }
 async function readConfigFile(file) {
@@ -146,8 +151,14 @@ function readEnvironment(env) {
 		trace_seed: env.LANGFUSE_WORKBUDDY_TRACE_SEED,
 		max_chars: env.LANGFUSE_WORKBUDDY_MAX_CHARS,
 		debug: env.LANGFUSE_WORKBUDDY_DEBUG,
-		fail_on_error: env.LANGFUSE_WORKBUDDY_FAIL_ON_ERROR
+		fail_on_error: env.LANGFUSE_WORKBUDDY_FAIL_ON_ERROR,
+		proxy_url: env.LANGFUSE_WORKBUDDY_PROXY_URL,
+		media_upload: first(env, "LANGFUSE_WORKBUDDY_MEDIA_UPLOAD", "LANGFUSE_MEDIA_UPLOAD_ENABLED")
 	});
+}
+/** Standard proxy variables, used only when no explicit proxy is configured. */
+function ambientProxy(env) {
+	return first(env, "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")?.trim() || void 0;
 }
 /** Resolve defaults -> ~/.workbuddy -> project .workbuddy -> environment. */
 async function getConfig(options) {
@@ -155,12 +166,14 @@ async function getConfig(options) {
 	const cwd = options?.cwd ?? process.cwd();
 	const env = options?.env ?? process.env;
 	const [globalConfig, localConfig] = await Promise.all([readConfigFile(path$1.join(home, ".workbuddy", "langfuse.json")), readConfigFile(path$1.join(cwd, ".workbuddy", "langfuse.json"))]);
-	return {
+	const config = {
 		...DEFAULTS,
 		...globalConfig,
 		...localConfig,
 		...readEnvironment(env)
 	};
+	config.proxy_url ??= ambientProxy(env);
+	return config;
 }
 
 //#endregion
@@ -28611,16 +28624,164 @@ var require_src = /* @__PURE__ */ __commonJSMin(((exports) => {
 }));
 
 //#endregion
-//#region src/instrumentation.ts
+//#region src/utils.ts
 var import_src = require_src();
+function readStdin() {
+	return new Promise((resolve, reject) => {
+		let buffer = "";
+		process.stdin.setEncoding("utf-8");
+		process.stdin.on("data", (chunk) => buffer += chunk);
+		process.stdin.on("end", () => {
+			try {
+				resolve(JSON.parse(buffer.trim()));
+			} catch (error) {
+				reject(error);
+			}
+		});
+		process.stdin.once("error", reject);
+	});
+}
+function toText(value) {
+	if (value == null) return "";
+	if (typeof value === "string") return value;
+	if ([
+		"number",
+		"boolean",
+		"bigint"
+	].includes(typeof value)) return String(value);
+	try {
+		return JSON.stringify(value);
+	} catch {
+		return String(value);
+	}
+}
+function truncate(value, maxChars) {
+	if (value.length <= maxChars) return value;
+	return `${value.slice(0, maxChars)}\n…[truncated ${value.length - maxChars} chars]`;
+}
+let debugEnabled = false;
+function setDebug(enabled) {
+	debugEnabled = enabled;
+}
+function debugLog(...args) {
+	if (debugEnabled) console.error("[langfuse-workbuddy]", ...args);
+}
+
+//#endregion
+//#region src/proxy.ts
+/**
+* `https.Agent` that reaches the target through an HTTP CONNECT proxy
+* (for example `http://127.0.0.1:7897`).
+*
+* The OpenTelemetry Node exporters build their own agents and never read
+* `HTTPS_PROXY`, so a proxy has to be injected through the exporter's agent
+* factory. This class is the agent handed to that factory.
+*/
+var HttpsProxyAgent = class extends https.Agent {
+	proxy;
+	constructor(proxyUrl, options = {}) {
+		super({
+			keepAlive: true,
+			...options
+		});
+		this.proxy = new URL(proxyUrl);
+	}
+	createConnection(options, callback) {
+		const host = String(options.host ?? options.hostname ?? "localhost");
+		const port = String(options.port ?? 443);
+		this.tunnel(host, port, options).then((socket) => callback?.(null, socket), (error) => callback?.(error, null));
+	}
+	tunnel(host, port, options) {
+		const proxyHost = this.proxy.hostname;
+		const proxyPort = Number(this.proxy.port || (this.proxy.protocol === "https:" ? 443 : 80));
+		const proxyIsSecure = this.proxy.protocol === "https:";
+		const headers = { host: `${host}:${port}` };
+		if (this.proxy.username || this.proxy.password) {
+			const credentials = `${decodeURIComponent(this.proxy.username)}:${decodeURIComponent(this.proxy.password)}`;
+			headers["proxy-authorization"] = `Basic ${Buffer.from(credentials).toString("base64")}`;
+		}
+		debugLog(`connecting to ${host}:${port} through proxy ${proxyHost}:${proxyPort}`);
+		return new Promise((resolve, reject) => {
+			const request = (proxyIsSecure ? https : http).request({
+				host: proxyHost,
+				port: proxyPort,
+				method: "CONNECT",
+				path: `${host}:${port}`,
+				headers,
+				agent: false
+			});
+			request.once("connect", (response, socket) => {
+				if (response.statusCode !== 200) {
+					socket.destroy();
+					reject(/* @__PURE__ */ new Error(`proxy CONNECT ${host}:${port} failed with ${response.statusCode}`));
+					return;
+				}
+				const secured = tls.connect({
+					...options,
+					socket,
+					servername: options.servername ?? host
+				});
+				secured.once("error", reject);
+				secured.once("secureConnect", () => resolve(secured));
+			});
+			request.once("error", (error) => reject(error));
+			request.end();
+		});
+	}
+};
+/**
+* Build the agent factory expected by `@opentelemetry/otlp-exporter-base`.
+* HTTPS traffic is tunneled through the proxy; plain HTTP (a local collector,
+* for example) connects directly.
+*/
+function createProxyAgentFactory(proxyUrl) {
+	let httpsAgent;
+	let httpAgent;
+	return async (protocol) => {
+		if (protocol === "http:") {
+			httpAgent ??= new http.Agent({ keepAlive: true });
+			return httpAgent;
+		}
+		httpsAgent ??= new HttpsProxyAgent(proxyUrl);
+		return httpsAgent;
+	};
+}
+
+//#endregion
+//#region src/instrumentation.ts
+const DEFAULT_TIMEOUT_SECONDS = 5;
+/**
+* `LangfuseSpanProcessor` builds its own OTLP exporter, and that exporter uses
+* `node:https` agents which ignore `HTTPS_PROXY`. When a proxy is configured we
+* therefore construct the exporter ourselves with a tunneling agent factory.
+* The endpoint and headers mirror Langfuse's own defaults.
+*/
+function createProxyExporter(config) {
+	const authHeader = Buffer.from(`${config.public_key}:${config.secret_key}`).toString("base64");
+	debugLog(`exporting spans through proxy ${config.proxy_url}`);
+	return new import_src$2.OTLPTraceExporter({
+		url: `${config.base_url}/api/public/otel/v1/traces`,
+		headers: {
+			Authorization: `Basic ${authHeader}`,
+			"x-langfuse-sdk-name": "javascript",
+			"x-langfuse-public-key": config.public_key ?? "<missing>"
+		},
+		timeoutMillis: DEFAULT_TIMEOUT_SECONDS * 1e3,
+		httpAgentOptions: createProxyAgentFactory(config.proxy_url)
+	});
+}
 function setupInstrumentation(config) {
+	const exporter = config.proxy_url ? createProxyExporter(config) : void 0;
+	const mediaUploadEnabled = config.media_upload ?? (config.proxy_url ? false : void 0);
 	const spanProcessor = new LangfuseSpanProcessor({
 		publicKey: config.public_key,
 		secretKey: config.secret_key,
 		baseUrl: config.base_url,
 		environment: config.environment,
 		exportMode: "batched",
-		shouldExportSpan: () => true
+		shouldExportSpan: () => true,
+		...exporter ? { exporter } : {},
+		...mediaUploadEnabled === void 0 ? {} : { mediaUploadEnabled }
 	});
 	const provider = new import_src.NodeTracerProvider({ spanProcessors: [spanProcessor] });
 	provider.register();
@@ -29328,49 +29489,6 @@ async function markTurnUploaded(transcript, turnId) {
 	try {
 		await fs$1.appendFile(sidecarPath(transcript), `${turnId}\n`, "utf8");
 	} catch {}
-}
-
-//#endregion
-//#region src/utils.ts
-function readStdin() {
-	return new Promise((resolve, reject) => {
-		let buffer = "";
-		process.stdin.setEncoding("utf-8");
-		process.stdin.on("data", (chunk) => buffer += chunk);
-		process.stdin.on("end", () => {
-			try {
-				resolve(JSON.parse(buffer.trim()));
-			} catch (error) {
-				reject(error);
-			}
-		});
-		process.stdin.once("error", reject);
-	});
-}
-function toText(value) {
-	if (value == null) return "";
-	if (typeof value === "string") return value;
-	if ([
-		"number",
-		"boolean",
-		"bigint"
-	].includes(typeof value)) return String(value);
-	try {
-		return JSON.stringify(value);
-	} catch {
-		return String(value);
-	}
-}
-function truncate(value, maxChars) {
-	if (value.length <= maxChars) return value;
-	return `${value.slice(0, maxChars)}\n…[truncated ${value.length - maxChars} chars]`;
-}
-let debugEnabled = false;
-function setDebug(enabled) {
-	debugEnabled = enabled;
-}
-function debugLog(...args) {
-	if (debugEnabled) console.error("[langfuse-workbuddy]", ...args);
 }
 
 //#endregion
