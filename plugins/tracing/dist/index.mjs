@@ -28751,6 +28751,11 @@ function createProxyAgentFactory(proxyUrl) {
 //#region src/instrumentation.ts
 const DEFAULT_TIMEOUT_SECONDS = 5;
 /**
+* Filled in by `tsdown` at build time from the installed `@langfuse/otel`
+* version. Absent under `vitest`, where no bundler runs the substitution.
+*/
+const SDK_VERSION = "5.10.1";
+/**
 * `LangfuseSpanProcessor` builds its own OTLP exporter, and that exporter uses
 * `node:https` agents which ignore `HTTPS_PROXY`. When a proxy is configured we
 * therefore construct the exporter ourselves with a tunneling agent factory.
@@ -28764,7 +28769,9 @@ function createProxyExporter(config) {
 		headers: {
 			Authorization: `Basic ${authHeader}`,
 			"x-langfuse-sdk-name": "javascript",
-			"x-langfuse-public-key": config.public_key ?? "<missing>"
+			"x-langfuse-sdk-version": SDK_VERSION,
+			"x-langfuse-public-key": config.public_key ?? "<missing>",
+			"x-langfuse-ingestion-version": "4"
 		},
 		timeoutMillis: DEFAULT_TIMEOUT_SECONDS * 1e3,
 		httpAgentOptions: createProxyAgentFactory(config.proxy_url)

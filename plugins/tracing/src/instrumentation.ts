@@ -14,6 +14,13 @@ type SpanExporter = NonNullable<ProcessorParams["exporter"]>;
 const DEFAULT_TIMEOUT_SECONDS = 5;
 
 /**
+ * Filled in by `tsdown` at build time from the installed `@langfuse/otel`
+ * version. Absent under `vitest`, where no bundler runs the substitution.
+ */
+const SDK_VERSION =
+  typeof __LANGFUSE_SDK_VERSION__ === "string" ? __LANGFUSE_SDK_VERSION__ : "unknown";
+
+/**
  * `LangfuseSpanProcessor` builds its own OTLP exporter, and that exporter uses
  * `node:https` agents which ignore `HTTPS_PROXY`. When a proxy is configured we
  * therefore construct the exporter ourselves with a tunneling agent factory.
@@ -27,7 +34,13 @@ function createProxyExporter(config: Config): SpanExporter {
     headers: {
       Authorization: `Basic ${authHeader}`,
       "x-langfuse-sdk-name": "javascript",
+      "x-langfuse-sdk-version": SDK_VERSION,
       "x-langfuse-public-key": config.public_key ?? "<missing>",
+      // Langfuse v4: a custom OTLP exporter that does not declare the ingestion
+      // version is treated as legacy OpenTelemetry and its data can lag by up to
+      // 15 minutes. The Langfuse SDK's own exporter opts in implicitly by
+      // identifying itself; ours replaces that exporter, so opt in explicitly.
+      "x-langfuse-ingestion-version": "4",
     },
     timeoutMillis: DEFAULT_TIMEOUT_SECONDS * 1000,
     // `httpAgentOptions` also accepts an agent factory; the published types only

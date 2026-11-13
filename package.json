@@ -1,6 +1,6 @@
 {
   "name": "@langfuse/workbuddy-observability-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "WorkBuddy plugin that traces agent turns, model calls, tools, token usage, and subagents to Langfuse",
   "keywords": [
     "workbuddy",
